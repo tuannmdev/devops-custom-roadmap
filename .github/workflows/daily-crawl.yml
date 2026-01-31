@@ -1,0 +1,121 @@
+name: Daily AWS Content Crawl
+
+on:
+  # Run daily at 2 AM UTC
+  schedule:
+    - cron: "0 2 * * *"
+
+  # Run weekly full crawl on Sundays at 4 AM UTC
+  schedule:
+    - cron: "0 4 * * 0"
+
+  # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "Operation to perform"
+        required: true
+        default: "daily-update"
+        type: choice
+        options:
+          - daily-update
+          - full-crawl
+          - process-content
+      batch_size:
+        description: "Batch size for processing"
+        required: false
+        default: "100"
+      quality_threshold:
+        description: "Minimum quality score (0.0-1.0)"
+        required: false
+        default: "0.5"
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          cd crawling
+          pip install -r requirements.txt
+
+      - name: Create logs directory
+        run: mkdir -p crawling/logs
+
+      - name: Determine operation
+        id: operation
+        run: |
+          # If manually triggered, use input
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "operation=${{ github.event.inputs.operation }}" >> $GITHUB_OUTPUT
+          # If Sunday at 4 AM, run full crawl
+          elif [ "$(date +%u)" = "7" ] && [ "$(date +%H)" = "04" ]; then
+            echo "operation=full-crawl" >> $GITHUB_OUTPUT
+          # Otherwise, daily update
+          else
+            echo "operation=daily-update" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run daily update
+        if: steps.operation.outputs.operation == 'daily-update'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        run: |
+          cd crawling
+          python orchestrator.py \
+            --operation daily-update \
+            --quality-threshold ${{ github.event.inputs.quality_threshold || '0.5' }}
+
+      - name: Run full crawl
+        if: steps.operation.outputs.operation == 'full-crawl'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        run: |
+          cd crawling
+          python orchestrator.py \
+            --operation full-crawl \
+            --max-items 1000 \
+            --quality-threshold ${{ github.event.inputs.quality_threshold || '0.5' }}
+
+      - name: Run content processing
+        if: steps.operation.outputs.operation == 'process-content'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          cd crawling
+          python orchestrator.py \
+            --operation process-content \
+            --batch-size ${{ github.event.inputs.batch_size || '100' }} \
+            --quality-threshold ${{ github.event.inputs.quality_threshold || '0.5' }}
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crawl-logs-${{ github.run_number }}
+          path: crawling/logs/
+          retention-days: 7
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "Crawl job failed! Check logs for details."
+          # Add notification integration here (Slack, Discord, email, etc.)
